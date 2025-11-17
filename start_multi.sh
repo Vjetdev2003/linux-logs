@@ -1,0 +1,1 @@
+python3 main.py start --uids 10 178 228
