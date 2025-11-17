@@ -262,7 +262,19 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                     send_flag = True
 
                 elif "avg_steps_behind=" in msg and "> max=" in msg:
-                    send_flag = True
+                    # chỉ gửi khi trong danh sách UID quan tâm
+                    allowed_uids = {186, 60, 70, 10, 228, 178, 193, 44, 243}
+                    # tách UID ra khỏi chuỗi log (ví dụ "UID 70 ..." hoặc "[70]")
+                    import re
+                    match = re.search(r"UID\s+(\d+)", msg)
+                    if match:
+                        uid = int(match.group(1))
+                        if uid in allowed_uids:
+                            send_flag = True
+                        else:
+                            send_flag = False
+                    else:
+                        send_flag = False
 
                 elif "No gradient gathered" in msg or "Consecutive misses" in msg:
                     send_flag = True
@@ -287,6 +299,8 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 elif "negative evaluations" in msg and "in last 8 windows" in msg:
                     send_flag = True
                 elif "consecutive negative evaluations" in msg:
+                    send_flag = True
+                elif "checkpoints/2.1.17/_LATEST.json" in msg:
                     send_flag = True
                 # Only send for target UID
                 if eval_uid and eval_uid != str(uid):
