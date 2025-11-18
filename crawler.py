@@ -263,7 +263,6 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                     # chỉ gửi khi trong danh sách UID quan tâm
                     allowed_uids = {186, 60, 70, 10, 228, 178, 193, 44, 243}
                     # tách UID ra khỏi chuỗi log (ví dụ "UID 70 ..." hoặc "[70]")
-                    import re
                     match = re.search(r"UID\s+(\d+)", msg)
                     if match:
                         uid = int(match.group(1))
