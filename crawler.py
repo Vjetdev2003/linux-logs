@@ -14,10 +14,11 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from discord_notify import send_discord
 
+# ==========================
+# UID cần theo dõi
+# ==========================
+TARGET_UIDS = {"10", "60", "70", "186", "193", "228", "44", "178", "243"}
 
-# -----------------------------
-# CONFIG
-# -----------------------------
 GRAFANA_URL_TEMPLATE = (
     "https://grafana.tplr.ai/d/service_logs_validator_1/"
     "service-logs-only-for-validator-uid3d-1?orgId=1&refresh=5s&var-Search={UID}"
@@ -25,13 +26,10 @@ GRAFANA_URL_TEMPLATE = (
 
 SENT_HISTORY_FILE = "sent_history.json"
 
-# UID cho phép gửi cảnh báo
-TARGET_UIDS = {"10", "60", "70", "186", "193", "228", "44", "178", "243"}
 
-
-# -----------------------------
-# LOAD / SAVE HISTORY
-# -----------------------------
+# --------------------------------------------------------
+# History
+# --------------------------------------------------------
 def load_sent_history():
     if not os.path.exists(SENT_HISTORY_FILE):
         return set()
@@ -47,9 +45,9 @@ def save_sent_history(sent_set):
         json.dump({k: True for k in sent_set}, f)
 
 
-# -----------------------------
-# START DRIVER
-# -----------------------------
+# --------------------------------------------------------
+# Driver
+# --------------------------------------------------------
 def start_driver():
     opts = webdriver.ChromeOptions()
     opts.add_argument("--headless=new")
@@ -64,9 +62,9 @@ def start_driver():
     )
 
 
-# -----------------------------
-# WAIT FOR DOM READY
-# -----------------------------
+# --------------------------------------------------------
+# DOM
+# --------------------------------------------------------
 def wait_for_dom(driver, gui_log):
     try:
         WebDriverWait(driver, 12).until(
@@ -80,9 +78,6 @@ def wait_for_dom(driver, gui_log):
         return False
 
 
-# -----------------------------
-# GET ROWS
-# -----------------------------
 def get_rows(driver):
     try:
         return driver.find_elements(
@@ -92,13 +87,27 @@ def get_rows(driver):
         return []
 
 
-# -----------------------------
+# --------------------------------------------------------
+# UID extract helpers
+# --------------------------------------------------------
+def match_uid_from_msg(msg):
+    m = re.search(r"UID\s+(\d+)", msg)
+    return m.group(1) if m else None
+
+
+def match_slashing_uid(msg):
+    m = re.search(r"Slashing\s+(\d+)", msg)
+    return m.group(1) if m else None
+
+
+# --------------------------------------------------------
 # MAIN CRAWLER
-# -----------------------------
+# --------------------------------------------------------
 def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
 
     url = GRAFANA_URL_TEMPLATE.replace("{UID}", str(uid))
     driver = None
+
     seen = {}
     sent_to_discord = load_sent_history()
     soft_refresh_count = 0
@@ -120,9 +129,9 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
 
         gui_log(">>> Realtime monitoring started.")
 
-        # -----------------------------
-        # LOOP START
-        # -----------------------------
+        # ===============================================================
+        # LOOP
+        # ===============================================================
         while should_run():
 
             if paused_flag():
@@ -132,15 +141,16 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
             now = datetime.datetime.now()
             logs = []
 
-            # Scroll
             try:
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                driver.execute_script(
+                    "window.scrollTo(0, document.body.scrollHeight);"
+                )
             except:
                 pass
 
             # HARD refresh every 60s
             if time.time() - last_full_refresh >= 60:
-                gui_log(">>> Auto HARD refresh (1 minute)...")
+                gui_log(">>> HARD refresh (every 1 min)")
                 try:
                     driver.get(url)
                     time.sleep(5)
@@ -156,7 +166,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 soft_refresh_count = 0
                 continue
 
-            # SOFT refresh if no logs for 120s
+            # SOFT refresh after 120s
             if time.time() - last_log_time_seen > 120:
                 gui_log(">>> Soft refresh...")
                 soft_refresh_count += 1
@@ -164,32 +174,31 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 try:
                     driver.refresh()
                     time.sleep(3)
-                    wait_for_dom(driver, gui_log)
                 except:
                     driver.quit()
                     driver = start_driver()
                     driver.get(url)
                     time.sleep(6)
-                    wait_for_dom(driver, gui_log)
-                    continue
+
+                wait_for_dom(driver, gui_log)
 
                 if soft_refresh_count >= 5:
-                    gui_log(">>> HARD reload — too many soft refreshes")
-                    driver.quit()
-                    driver = start_driver()
+                    gui_log(">>> HARD reload due to many soft refreshes")
                     driver.get(url)
                     time.sleep(6)
                     wait_for_dom(driver, gui_log)
                     soft_refresh_count = 0
+
                 continue
 
-            # READ rows
             rows = get_rows(driver)
             if len(rows) == 0:
                 time.sleep(1)
                 continue
 
-            # PARSE rows
+            # ===========================================================
+            # PARSE ROWS
+            # ===========================================================
             for row in rows:
                 try:
                     html = row.get_attribute("innerHTML")
@@ -198,6 +207,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
 
                 soup = BeautifulSoup(html, "html.parser")
                 tds = soup.find_all("td")
+
                 if len(tds) < 5:
                     continue
 
@@ -205,103 +215,115 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 msg = tds[4].get_text(strip=True)
 
                 try:
-                    log_time = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f")
+                    log_time = datetime.datetime.strptime(
+                        ts, "%Y-%m-%d %H:%M:%S.%f"
+                    )
                 except:
                     try:
-                        log_time = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                        log_time = datetime.datetime.strptime(
+                            ts, "%Y-%m-%d %H:%M:%S"
+                        )
                     except:
                         continue
 
                 if now - log_time > time_range:
                     continue
 
+                # extract eval_uid
                 label_td = tds[3]
                 labels = {}
+
                 for sp in label_td.find_all("span"):
                     title = sp.get("title", "")
                     if ":" in title:
                         key, val = title.split(":", 1)
                         labels[key.strip()] = val.strip()
 
-                eval_uid = labels.get("eval_uid")
+                eval_uid = labels.get("eval_uid") or match_uid_from_msg(msg)
+                slashing_uid = match_slashing_uid(msg)
 
                 uniq = ts + "|" + msg
-                logs.append((log_time, uniq, ts, eval_uid, msg))
+                logs.append((log_time, uniq, ts, eval_uid, slashing_uid, msg))
 
-            # SORT logs
             logs.sort(key=lambda x: x[0])
 
-            # PROCESS logs
-            for log_time, uniq, ts, eval_uid, msg in logs:
+            # ===========================================================
+            # PROCESS LOGS
+            # ===========================================================
+            for log_time, uniq, ts, eval_uid, slashing_uid, msg in logs:
 
+                # SHOW LOG
                 if uniq not in seen:
                     last_log_time_seen = time.time()
                     soft_refresh_count = 0
 
                     if eval_uid:
-                        gui_log(f"UID: {eval_uid}] {msg}")
+                        gui_log(f"[UID {eval_uid}] {msg}")
                     else:
                         gui_log(f"{msg}")
 
                     seen[uniq] = log_time
 
-                # --------------------------------------
-                #           FILTER RULES
-                # --------------------------------------
+                # =========================================
+                # FILTERING RULES
+                # =========================================
                 send_flag = False
 
-                # Extract UID if missing
-                uid_in_msg = None
-                m = re.search(r"UID\s+(\d+)", msg)
-                if m:
-                    uid_in_msg = m.group(1)
+                uid_candidates = {eval_uid, slashing_uid}
+                eval_target_ok = any(
+                    uid in TARGET_UIDS for uid in uid_candidates if uid
+                )
 
-                # Negative eval
-                if "negative eval frequency" in msg:
-                    send_flag = True
-
-                # Sync steps behind
-                elif "Sync average steps behind" in msg:
-                    send_flag = True  # luôn gửi, nhưng sẽ lọc UID
-
-                # BMA score
-                elif "Binary Moving Average Score" in msg:
-                    send_flag = True
-
-                # avg_steps_behind > max
-                elif "avg_steps_behind=" in msg and "> max=" in msg:
-                    send_flag = True
-
-                # General gradient-related issues
-                elif any(x in msg for x in [
+                # lỗi chung
+                error_patterns = [
+                    "negative eval frequency",
+                    "Binary Moving Average Score",
                     "No gradient gathered",
                     "Consecutive misses",
+                    "Skipped score of UID",
                     "gradient not found",
-                    "uploaded too early",
-                    "uploaded too late",
+                    "Skipped reducing score",
+                    "No gradient received",
+                    "Slashing moving average score",
                     "MEGA SLASH",
                     "negative evaluations",
-                    "consecutive negative evaluations"
-                ]):
+                    "consecutive negative evaluations",
+                ]
+
+                if any(p in msg for p in error_patterns):
                     send_flag = True
 
-                # --------------------------------------
-                # FILTER UID — chỉ gửi nếu trong TARGET_UIDS
-                # --------------------------------------
-                actual_uid = eval_uid or uid_in_msg
+                # sync steps behind
+                if "Sync average steps behind" in msg and "interquartile mean" in msg:
+                    if eval_target_ok:
+                        send_flag = True
 
-                if actual_uid and actual_uid not in TARGET_UIDS:
+                # avg_steps_behind
+                if ("avg_steps_behind=" in msg and "> max=" in msg):
+                    if eval_target_ok:
+                        send_flag = True
+
+                # DCP upload (luôn gửi)
+                if "[DCP][upload]" in msg:
+                    send_flag = True
+
+                # skip checkpoint
+                if "Creating checkpoint at global_step" in msg:
                     send_flag = False
 
-                # --------------------------------------
-                # SEND TO DISCORD
-                # --------------------------------------
+                # enforce target UID filter (except DCP upload)
+                if "[DCP][upload]" not in msg:
+                    if not eval_target_ok:
+                        send_flag = False
+
+                # =========================================
+                # SEND TO DISCORD (FINAL)
+                # =========================================
                 if send_flag and uniq not in sent_to_discord:
 
-                    if actual_uid:
-                        send_discord(f"[Eval UID: {actual_uid}] {msg}")
-                    else:
-                        send_discord(f"{msg}")
+                    prefix = f"[Eval UID {eval_uid}] " if eval_uid else ""
+
+                    send_discord(f"{prefix}{msg}")
 
                     sent_to_discord.add(uniq)
                     save_sent_history(sent_to_discord)
