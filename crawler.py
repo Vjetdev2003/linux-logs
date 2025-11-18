@@ -258,10 +258,8 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 # ------------------ FILTER LỖI ------------------
                 send_flag = False
 
-                if "negative eval frequency" in msg:
-                    send_flag = True
 
-                elif "avg_steps_behind=" in msg and "> max=" in msg:
+                if "avg_steps_behind=" in msg and "> max=" in msg:
                     # chỉ gửi khi trong danh sách UID quan tâm
                     allowed_uids = {186, 60, 70, 10, 228, 178, 193, 44, 243}
                     # tách UID ra khỏi chuỗi log (ví dụ "UID 70 ..." hoặc "[70]")
@@ -287,13 +285,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 elif "Skipped reducing score of UID" in msg and "due to negative zero value" in msg:
                     send_flag = True
                 elif "No gradient received from" in msg and "Slashing moving average score" in msg: 
-                    send_flag = True
-                elif "key gradient was uploaded too late" in msg:
-                    send_flag = True
-                elif "key gradient was uploaded too early" in msg:
-                    send_flag = True
-                elif "exists but was uploaded too early" in msg:
-                    send_flag = True    
+                    send_flag = True 
                 elif "MEGA SLASH" in msg and " adding to naughty list for 20 windows" in msg:
                     send_flag = True
                 elif "negative evaluations" in msg and "in last 8 windows" in msg:
@@ -302,6 +294,12 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                     send_flag = True
                 elif "checkpoints/2.1.17/_LATEST.json" in msg:
                     send_flag = True
+                elif "Sync average steps behind" in msg:
+                    m = re.search(r"UID\s+(\d+)", msg)
+                    if m:
+                        log_uid = m.group(1)
+                        if log_uid in {"10", "60", "70", "186", "193", "228", "44", "178", "243"}:
+                            send_flag = True
                 # Only send for target UID
                 if eval_uid and eval_uid != str(uid):
                     send_flag = False
