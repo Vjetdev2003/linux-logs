@@ -75,7 +75,7 @@ def wait_for_dom(driver, gui_log):
 
 
 # --------------------------------------------------------
-# GET ROWS STABLE
+# GET ROWS
 # --------------------------------------------------------
 def get_rows(driver):
     try:
@@ -101,6 +101,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
 
     time_range = datetime.timedelta(minutes=time_range_minutes)
     last_log_time_seen = time.time()
+    last_full_refresh = time.time()      # ⭐ LAST FULL REFRESH 3-MIN TIMER
 
     try:
         gui_log(">>> Starting Chrome headless...")
@@ -131,6 +132,31 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             except:
                 pass
+
+            # ===========================================================
+            # AUTO HARD REFRESH EVERY 3 MINUTES (180 seconds)
+            # ===========================================================
+            if time.time() - last_full_refresh >= 60:
+                gui_log(">>> Auto HARD refresh (every 1 minutes)...")
+
+                try:
+                    driver.get(url)
+                    time.sleep(5)
+                    wait_for_dom(driver, gui_log)
+                except Exception as e:
+                    gui_log(f">>> Hard refresh crashed: {e}")
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                    driver = start_driver()
+                    driver.get(url)
+                    time.sleep(6)
+                    wait_for_dom(driver, gui_log)
+
+                last_full_refresh = time.time()
+                soft_refresh_count = 0
+                continue
 
             # ===========================================================
             # SOFT REFRESH LOGIC
@@ -258,20 +284,18 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 # ------------------ FILTER LỖI ------------------
                 send_flag = False
 
-
-                if "avg_steps_behind=" in msg and "> max=" in msg:
-                    # chỉ gửi khi trong danh sách UID quan tâm
-                    allowed_uids = {186, 60, 70, 10, 228, 178, 193, 44, 243}
-                    # tách UID ra khỏi chuỗi log (ví dụ "UID 70 ..." hoặc "[70]")
-                    match = re.search(r"UID\s+(\d+)", msg)
-                    if match:
-                        uid = int(match.group(1))
-                        if uid in allowed_uids:
+                if "negative eval frequency" in msg:
+                    send_flag = True
+                elif "Sync average steps behind" in msg and "interquartile mean" in msg:
+                    m = re.search(r"UID\s+(\d+)", msg)
+                    if m:
+                        log_uid = m.group(1)
+                        if log_uid in {"10", "60", "70", "186", "193", "228", "44", "178", "243"}:
                             send_flag = True
-                        else:
-                            send_flag = False
-                    else:
-                        send_flag = False
+                elif "Binary Moving Average Score" in msg:
+                    send_flag = True
+                elif "avg_steps_behind=" in msg and "> max=" in msg:
+                    send_flag = True
 
                 elif "No gradient gathered" in msg or "Consecutive misses" in msg:
                     send_flag = True
@@ -281,24 +305,35 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                     
                 elif "Skipped UID" in msg and "gradient not found" in msg:
                     send_flag = True
+
                 elif "Skipped reducing score of UID" in msg and "due to negative zero value" in msg:
                     send_flag = True
+
                 elif "No gradient received from" in msg and "Slashing moving average score" in msg: 
-                    send_flag = True 
+                    send_flag = True
+
+                elif "key gradient was uploaded too late" in msg:
+                    send_flag = True
+
+                elif "key gradient was uploaded too early" in msg:
+                    send_flag = True
+
+                elif "exists but was uploaded too early" in msg:
+                    send_flag = True    
+
                 elif "MEGA SLASH" in msg and " adding to naughty list for 20 windows" in msg:
                     send_flag = True
+
                 elif "negative evaluations" in msg and "in last 8 windows" in msg:
                     send_flag = True
+
                 elif "consecutive negative evaluations" in msg:
                     send_flag = True
-                elif "checkpoints/2.1.17/_LATEST.json" in msg:
-                    send_flag = True
-                elif "Sync average steps behind" in msg:
-                    m = re.search(r"UID\s+(\d+)", msg)
-                    if m:
-                        log_uid = m.group(1)
-                        if log_uid in {"10", "60", "70", "186", "193", "228", "44", "178", "243"}:
-                            send_flag = True
+                elif "Creating checkpoint at global_step" in msg:
+                    send_flag = False
+                
+
+
                 # Only send for target UID
                 if eval_uid and eval_uid != str(uid):
                     send_flag = False
@@ -307,9 +342,9 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 if send_flag and uniq not in sent_to_discord:
 
                     if eval_uid:
-                        send_discord(f"⚠️ [{ts}] [Eval UID: {eval_uid}] {msg}")
+                        send_discord(f"[{ts}] [Eval UID: {eval_uid}] {msg}")
                     else:
-                        send_discord(f"⚠️ [{ts}] {msg}")
+                        send_discord(f"[{ts}] {msg}")
 
                     sent_to_discord.add(uniq)
                     save_sent_history(sent_to_discord)
