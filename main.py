@@ -2,53 +2,70 @@ import argparse
 import threading
 import time
 import sys
+
 from crawler import run_crawler
 
 # Global flags
 is_running = False
 is_paused = False
 
+# NEW: Global lock to avoid double-start
+start_lock = threading.Lock()
+
+# Store active crawler threads to shut them down cleanly
+active_threads = []
+
+
 def log_cli(msg):
     print(msg, flush=True)
 
+
 def should_run():
     return is_running
+
 
 def paused_flag():
     return is_paused
 
 
 # =======================================================
-# START MULTI UID
+# START MULTI UID (FIXED)
 # =======================================================
 def start(uids, minutes):
-    global is_running, is_paused
+    global is_running, is_paused, active_threads
 
-    if is_running:
-        print(">>> Old session detected. Stopping...")
-        is_running = False
-        time.sleep(1)
+    with start_lock:
+        if is_running:
+            print(">>> Old session detected. Stopping...")
+            is_running = False
+            time.sleep(1)
 
-    print(f">>> START crawler for UIDs {uids} ({minutes} minutes range)")
+        print(f">>> START crawler for UIDs {uids} ({minutes} minutes range)")
 
-    is_running = True
-    is_paused = False
+        is_running = True
+        is_paused = False
+        active_threads = []
 
-    # Khởi chạy mỗi UID 1 thread
-    for uid in uids:
-        print(f">>> Launching UID {uid} ...")
+        # Mỗi UID 1 thread – PM2 SAFE – NO DUPLICATE
+        for uid in uids:
+            print(f">>> Launching UID {uid} ...")
 
-        threading.Thread(
-            target=run_crawler,
-            args=(uid, minutes, log_cli, should_run, paused_flag),
-            daemon=True
-        ).start()
-
-        time.sleep(0.3)  # tránh crash Chrome headless khi mở nhiều cùng lúc
+            t = threading.Thread(
+                target=run_crawler,
+                args=(uid, minutes, log_cli, should_run, paused_flag),
+                daemon=True
+            )
+            active_threads.append(t)
+            t.start()
+            time.sleep(0.3)
 
     # giữ CLI chạy
     try:
         while is_running:
+            alive = any(t.is_alive() for t in active_threads)
+            if not alive:
+                print(">>> All crawler threads ended.")
+                break
             time.sleep(0.5)
     except KeyboardInterrupt:
         print(">>> Ctrl + C detected. Stopping...")
@@ -123,7 +140,7 @@ def main():
         # Parse danh sách UID
         uids = []
         for raw in args.uid:
-            raw = raw.replace(",", " ")  # hỗ trợ dạng "178,228"
+            raw = raw.replace(",", " ")
             for part in raw.split():
                 if part.isdigit():
                     uids.append(int(part))
