@@ -304,9 +304,14 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                         send_flag = True
                     else:
                         send_flag = False
+                elif "Gradient Score" in msg:
+                    if eval_uid == str(uid):
+                        send_flag = True
+                    else:
+                        send_flag = False
                 elif "Binary Moving Average Score" in msg:
                     send_flag = True
-                elif "checkpoints/2.1.17/_LATEST.json" in msg:
+                elif "[DCP][upload] rank 0/4 ↑ checkpoints/2.1.17/_LATEST.json 0.00 MiB in" in msg:
                     send_flag = True
                 elif "Sync average steps behind:" in msg and "interquartile mean" in msg:
                     if eval_uid == str(uid):
