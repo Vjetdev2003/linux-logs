@@ -4,7 +4,7 @@ import json
 import os
 import re
 import datetime
-
+from prettytable import PrettyTable
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
@@ -23,9 +23,14 @@ GRAFANA_URL_TEMPLATE = (
 SENT_HISTORY_FILE = "sent_history.json"
 
 
-# --------------------------------------------------------
-# LOAD / SAVE HISTORY
-# --------------------------------------------------------
+def print_table(data):
+    table = PrettyTable()
+    table.field_names = ["Window", "Status"]
+    for window, status in data:
+        table.add_row([window, status])
+    return table.get_string()
+
+
 def load_sent_history():
     if not os.path.exists(SENT_HISTORY_FILE):
         return set()
@@ -41,9 +46,6 @@ def save_sent_history(sent_set):
         json.dump({k: True for k in sent_set}, f)
 
 
-# --------------------------------------------------------
-# START DRIVER
-# --------------------------------------------------------
 def start_driver():
     opts = webdriver.ChromeOptions()
     opts.add_argument("--headless=new")
@@ -58,9 +60,6 @@ def start_driver():
     )
 
 
-# --------------------------------------------------------
-# WAIT FOR DOM READY
-# --------------------------------------------------------
 def wait_for_dom(driver, gui_log):
     try:
         WebDriverWait(driver, 12).until(
@@ -74,21 +73,16 @@ def wait_for_dom(driver, gui_log):
         return False
 
 
-# --------------------------------------------------------
-# GET ROWS STABLE
-# --------------------------------------------------------
 def get_rows(driver):
     try:
         return driver.find_elements(
-            By.XPATH, "//tr[td[contains(@class,'logs-row__localtime')]]"
+            By.XPATH,
+            "//tr[td[contains(@class,'logs-row__localtime')]]"
         )
     except:
         return []
 
 
-# --------------------------------------------------------
-# MAIN CRAWLER
-# --------------------------------------------------------
 def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
 
     url = GRAFANA_URL_TEMPLATE.replace("{UID}", str(uid))
@@ -97,8 +91,11 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
     sent_to_discord = load_sent_history()
     soft_refresh_count = 0
 
-    gui_log(f"Loaded {len(sent_to_discord)} sent logs history.")
+    # memory used ONLY for Gradient Score rows
+    globals()["last_window_value"] = None
+    globals()["last_uid_value"] = None
 
+    gui_log(f"Loaded {len(sent_to_discord)} sent logs history.")
     time_range = datetime.timedelta(minutes=time_range_minutes)
     last_log_time_seen = time.time()
 
@@ -113,12 +110,8 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
 
         gui_log(">>> Realtime monitoring started.")
 
-        # ===============================================================
-        # LOOP
-        # ===============================================================
         while should_run():
 
-            # Pause
             if paused_flag():
                 time.sleep(0.25)
                 continue
@@ -126,25 +119,20 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
             now = datetime.datetime.now()
             logs = []
 
-            # Scroll
             try:
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             except:
                 pass
 
-            # ===========================================================
-            # SOFT REFRESH LOGIC
-            # ===========================================================
             if time.time() - last_log_time_seen > 120:
                 gui_log(">>> Soft refresh...")
                 soft_refresh_count += 1
-
                 try:
                     driver.refresh()
                     time.sleep(3)
                     wait_for_dom(driver, gui_log)
-                except Exception as e:
-                    gui_log(f">>> Soft refresh crashed ChromeDriver: {e}")
+                except:
+                    gui_log(">>> Soft refresh crashed, restarting driver...")
                     driver.quit()
                     driver = start_driver()
                     driver.get(url)
@@ -152,16 +140,15 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                     wait_for_dom(driver, gui_log)
                     continue
 
-                # HARD RELOAD
                 if soft_refresh_count >= 5:
-                    gui_log(">>> HARD RELOAD triggered (5 soft refreshes)")
+                    gui_log(">>> HARD RELOAD triggered")
                     try:
                         driver.get(url)
                         time.sleep(6)
                         wait_for_dom(driver, gui_log)
                         soft_refresh_count = 0
                     except:
-                        gui_log(">>> HARD reload crashed — restarting Chrome...")
+                        gui_log(">>> HARD reload crashed — restarting driver...")
                         driver.quit()
                         driver = start_driver()
                         driver.get(url)
@@ -169,16 +156,12 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                         wait_for_dom(driver, gui_log)
                     continue
 
-            # ===========================================================
-            # GET ROWS (retry)
-            # ===========================================================
             rows = get_rows(driver)
-
-            if len(rows) == 0:
+            if not rows:
                 time.sleep(2)
                 rows = get_rows(driver)
 
-            if len(rows) == 0:
+            if not rows:
                 gui_log(">>> DOM not ready (0 rows), skipping...")
                 time.sleep(1)
                 continue
@@ -187,7 +170,6 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
             # PARSE ROWS
             # ===========================================================
             for row in rows:
-
                 try:
                     html = row.get_attribute("innerHTML")
                 except:
@@ -195,14 +177,26 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
 
                 soup = BeautifulSoup(html, "html.parser")
                 tds = soup.find_all("td")
-
                 if len(tds) < 5:
                     continue
 
+                # extract columns
+                try:
+                    window_value = int(tds[0].get_text(strip=True))
+                except:
+                    window_value = None
+
+                uid_value = tds[1].get_text(strip=True)
                 ts = tds[2].get_text(strip=True)
                 msg = tds[4].get_text(strip=True)
 
-                # Parse timestamp
+                # update last window/uid for Gradient Score ONLY
+                if window_value is not None:
+                    globals()["last_window_value"] = window_value
+                if uid_value:
+                    globals()["last_uid_value"] = uid_value
+
+                # parse timestamp
                 try:
                     log_time = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f")
                 except:
@@ -214,10 +208,9 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 if now - log_time > time_range:
                     continue
 
-                # Extract labels
+                # extract label eval_uid
                 label_td = tds[3]
                 labels = {}
-
                 for sp in label_td.find_all("span"):
                     title = sp.get("title", "")
                     if ":" in title:
@@ -225,120 +218,163 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                         labels[key.strip()] = val.strip()
 
                 eval_uid = labels.get("eval_uid")
-
-                # fallback search
                 if not eval_uid:
-                    m = re.search(r"UID\s+(\d+)", msg)
-                    if m:
-                        eval_uid = m.group(1)
+                    m2 = re.search(r"UID\s+(\d+)", msg)
+                    if m2:
+                        eval_uid = m2.group(1)
 
                 uniq = ts + "|" + msg
-                logs.append((log_time, uniq, ts, eval_uid, msg))
+                logs.append((log_time, uniq, ts, eval_uid, msg, window_value, uid_value))
 
-            # SORT logs
             logs.sort(key=lambda x: x[0])
 
             # ===========================================================
             # PROCESS LOGS
             # ===========================================================
-            for log_time, uniq, ts, eval_uid, msg in logs:
+            for (
+                log_time,
+                uniq,
+                ts,
+                eval_uid,
+                msg,
+                window_value,
+                uid_value
+            ) in logs:
 
-                # Show on GUI
+                # GUI display
                 if uniq not in seen:
                     last_log_time_seen = time.time()
-                    soft_refresh_count = 0  # RESET COUNTER
-
+                    soft_refresh_count = 0
                     if eval_uid:
                         gui_log(f"[{ts}] [Eval UID: {eval_uid}] {msg}")
                     else:
                         gui_log(f"[{ts}] {msg}")
-
                     seen[uniq] = log_time
 
-                # ------------------ FILTER LỖI ------------------
+                # =======================================================
+                # SPECIAL CASE: CHECKPOINT UPLOAD (NO UID, SEND ONCE)
+                # =======================================================
+                if "[DCP][upload]" in msg or "checkpoints" in msg and "LATEST.json" in msg:
+
+                    global_key = "checkpoint" + msg and "LATEST.json" in msg 
+
+                    if global_key not in sent_to_discord:
+                        send_discord(f"[CHECKPOINT] {msg}")
+                        sent_to_discord.add(global_key)
+                        save_sent_history(sent_to_discord)
+
+                    continue
+
+                # =======================================================
+                # GRADIENT SCORE (special window fallback)
+                # =======================================================
+                mgs = re.search(
+                    r"Gradient Score[:\s]+(-?\d+\.?\d*(e-?\d+)?)",
+                    msg,
+                    re.IGNORECASE
+                )
+
+                if mgs:
+
+                    score = float(mgs.group(1))
+
+                    # If this row does not have window → use last_window
+                    real_window = (
+                        window_value
+                        if window_value is not None
+                        else globals()["last_window_value"]
+                    )
+
+                    real_uid = (
+                        uid_value
+                        if uid_value
+                        else globals()["last_uid_value"]
+                    )
+
+                    if str(real_uid) == str(uid) and real_window:
+
+                        status = "d" if score > 0 else "a"
+
+                        if "gradient_history" not in globals():
+                            globals()["gradient_history"] = {}
+                        gradient_history = globals()["gradient_history"]
+
+                        gradient_history[real_window] = status
+
+                        gui_log(
+                            f"[Gradient Score] Window {real_window} = {score} → {status}"
+                        )
+
+                        # table (test: 1 window)
+                        last1 = sorted(
+                            gradient_history.keys(), reverse=True
+                        )[:1]
+                        table_data = [
+                            (w, gradient_history[w]) for w in last1
+                        ]
+                        table_str = print_table(table_data)
+
+                        gui_log(
+                            "\n===== GRADIENT WINDOW STATUS =====\n"
+                            + table_str
+                            + "\n"
+                        )
+                        send_discord(f"```\n{table_str}\n```")
+
+                        # keep only 1
+                        for old in list(gradient_history.keys()):
+                            if old not in last1:
+                                del gradient_history[old]
+
+                # =======================================================
+                # ORIGINAL ALERT LOGIC
+                # =======================================================
                 send_flag = False
 
                 if "negative eval frequency" in msg:
                     send_flag = True
 
                 elif "avg_steps_behind=" in msg and "> max=" in msg:
-                    send_flag = True
-                    # chỉ gửi khi trong danh sách UID quan tâm
-                    allowed_uids = {186, 60, 70, 10, 228, 178, 193, 44, 243}
-                    # tách UID ra khỏi chuỗi log (ví dụ "UID 70 ..." hoặc "[70]")
-                    if eval_uid == str(uid):
-                        send_flag = True
-                    else:
-                        send_flag = False
+                    send_flag = eval_uid == str(uid)
 
                 elif "No gradient gathered" in msg or "Consecutive misses" in msg:
                     send_flag = True
 
-                elif "Skipped score of UID" in msg and ("zero" in msg or "negative" in msg):
+                elif "Skipped score of UID" in msg:
                     send_flag = True
 
-                elif "Skipped UID" in msg and "gradient not found" in msg:
-                    send_flag = True
-                elif "Skipped reducing score of UID" in msg and "due to negative zero value" in msg:
-                    if eval_uid == str(uid):
-                        send_flag = True
-                    else:
-                        send_flag = False
-                elif "No gradient received from" in msg and "Slashing moving average score" in msg: 
-                    if eval_uid == str(uid):
-                        send_flag = True
-                    else:
-                        send_flag = False
-                elif "MEGA SLASH" in msg and " adding to naughty list for 20 windows" in msg:
-                    if eval_uid == str(uid):
-                        send_flag = True
-                    else:
-                        send_flag = False
-                elif "negative evaluations" in msg and "in last 8 windows" in msg:
-                    if eval_uid == str(uid):
-                        send_flag = True
-                    else:
-                        send_flag = False
+                elif "Skipped UID" in msg:
+                    send_flag = eval_uid == str(uid)
+
+                elif "Skipped reducing score of UID" in msg:
+                    send_flag = eval_uid == str(uid)
+
+                elif "No gradient received from" in msg:
+                    send_flag = eval_uid == str(uid)
+
+                elif "MEGA SLASH" in msg:
+                    send_flag = eval_uid == str(uid)
+
+                elif "negative evaluations" in msg:
+                    send_flag = eval_uid == str(uid)
+
                 elif "consecutive negative evaluations" in msg:
-                    if eval_uid == str(uid):
-                        send_flag = True
-                    else:
-                        send_flag = False
-                elif "Gradient Score" in msg:
-                    if eval_uid == str(uid):
-                        send_flag = True
-                    else:
-                        send_flag = False
-                elif "Binary Moving Average Score" in msg:
-                    send_flag = True
-                elif "[DCP][upload] rank 0/4 ↑ checkpoints/2.1.17/_LATEST.json 0.00 MiB in" in msg:
-                    send_flag = True
-                elif "Sync average steps behind:" in msg and "interquartile mean" in msg:
-                    if eval_uid == str(uid):
-                        send_flag = True
-                    else:
-                        send_flag = False
-                # Only send for target UID
+                    send_flag = eval_uid == str(uid)
+
                 if eval_uid and eval_uid != str(uid):
                     send_flag = False
 
-                # SEND
                 if send_flag and uniq not in sent_to_discord:
-
-                    if eval_uid:
-                        send_discord(f" [Eval UID: {eval_uid}] {msg}")
-                    else:
-                        send_discord(f"{msg}")
-
+                    send_discord(f"[UID: {eval_uid}] {msg}")
                     sent_to_discord.add(uniq)
                     save_sent_history(sent_to_discord)
 
-            # CLEANUP
-            old = []
+            # cleanup
+            old_keys = []
             for k, t in seen.items():
                 if now - t > time_range:
-                    old.append(k)
-            for k in old:
+                    old_keys.append(k)
+            for k in old_keys:
                 del seen[k]
 
             time.sleep(0.25)
