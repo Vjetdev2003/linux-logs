@@ -42,8 +42,7 @@ def load_sent_history():
 
 
 def save_sent_history(sent_set):
-    with open(SENT_HISTORY_FILE, "w") as f:
-        json.dump({k: True for k in sent_set}, f)
+    with open(SENT_HISTORY_FILE, "w") as f: json.dump({k: True for k in sent_set}, f)
 
 
 def start_driver():
@@ -87,7 +86,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
 
     url = GRAFANA_URL_TEMPLATE.replace("{UID}", str(uid))
     driver = None
-    seen = {}
+    seen = {}  
     sent_to_discord = load_sent_history()
     soft_refresh_count = 0
 
@@ -130,7 +129,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 try:
                     driver.refresh()
                     time.sleep(3)
-                    wait_for_dom(driver, gui_log)
+                    wait_for_dom(driver, gui_log)  
                 except:
                     gui_log(">>> Soft refresh crashed, restarting driver...")
                     driver.quit()
@@ -172,8 +171,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
             for row in rows:
                 try:
                     html = row.get_attribute("innerHTML")
-                except:
-                    continue
+                except:   continue
 
                 soup = BeautifulSoup(html, "html.parser")
                 tds = soup.find_all("td")
@@ -215,9 +213,8 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                     title = sp.get("title", "")
                     if ":" in title:
                         key, val = title.split(":", 1)
-                        labels[key.strip()] = val.strip()
-
-                eval_uid = labels.get("eval_uid")
+                        labels[key.strip()] = val.strip() 
+                        eval_uid = labels.get("eval_uid")
                 if not eval_uid:
                     m2 = re.search(r"UID\s+(\d+)", msg)
                     if m2:
@@ -254,12 +251,12 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 # =======================================================
                 # SPECIAL CASE: CHECKPOINT UPLOAD (NO UID, SEND ONCE)
                 # =======================================================
-                if "[DCP][upload]" in msg or "checkpoints" in msg and "LATEST.json" in msg:
+                if "[DCP][upload]" in msg or "checkpoints" in msg and "_LATEST.json" in msg:
 
-                    global_key = "checkpoint" + msg and "LATEST.json" in msg 
+                    global_key = "checkpoint" + msg and "LATEST.json" in msg
 
                     if global_key not in sent_to_discord:
-                        send_discord(f"[CHECKPOINT] {msg}")
+                        send_discord(f"[CHECKPOINT] {msg}") 
                         sent_to_discord.add(global_key)
                         save_sent_history(sent_to_discord)
 
@@ -302,8 +299,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                         gradient_history[real_window] = status
 
                         gui_log(
-                            f"[Gradient Score] Window {real_window} = {score} → {status}"
-                        )
+                            f"[Gradient Score] Window {real_window} = {score} → {status}" )
 
                         # table (test: 1 window)
                         last1 = sorted(
@@ -343,7 +339,7 @@ def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
                 elif "Skipped score of UID" in msg:
                     send_flag = True
 
-                elif "Skipped UID" in msg:
+                elif "Skipped UID" in msg:  
                     send_flag = eval_uid == str(uid)
 
                 elif "Skipped reducing score of UID" in msg:

@@ -42,7 +42,7 @@ def start(uids, minutes):
 
         print(f">>> START crawler for UIDs {uids} ({minutes} minutes range)")
 
-        is_running = True
+        is_running = True 
         is_paused = False
         active_threads = []
 
@@ -83,8 +83,6 @@ def pause():
         return
     is_paused = True
     print(">>> PAUSED.")
-
-
 # =======================================================
 # RESUME
 # =======================================================
@@ -124,8 +122,7 @@ def main():
 
     parser.add_argument(
         "--uid",
-        nargs="+",
-        help="Nhập 1 hoặc nhiều UID, ví dụ: --uid 178 228 10"
+        nargs="+", help="Nhập 1 hoặc nhiều UID, ví dụ: --uid 178 228 10"
     )
 
     parser.add_argument("--minutes", type=int, default=5, help="Time range (minutes)")
@@ -156,7 +153,6 @@ def main():
 
     elif args.command == "resume":
         resume()
-
     elif args.command == "stop":
         stop()
 

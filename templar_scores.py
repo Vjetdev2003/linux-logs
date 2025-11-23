@@ -1,18 +1,19 @@
-import json
-import os
-import time
+import argparse
 import threading
+import time
+import sys
+
 from crawler_templar_scores import run_crawler_templar_scores
 
-COMMAND_FILE = "commands.json"
-
+# Global flags
 is_running = False
 is_paused = False
-running_threads = []
-start_lock = threading.Lock()
+
+# Store active crawler threads
+active_threads = []
 
 
-def log(msg):
+def log_cli(msg):
     print(msg, flush=True)
 
 
@@ -24,107 +25,113 @@ def paused_flag():
     return is_paused
 
 
-def start_crawlers(uids, minutes):
-    global is_running, is_paused, running_threads
+# =======================================================
+# START MULTI UID (FIXED — only 1 thread)
+# =======================================================
+def start(uids, minutes):
+    global is_running, is_paused, active_threads
 
-    with start_lock:
-        if is_running:
-            log(">>> Stopping old session...")
-            is_running = False
-            time.sleep(1)
+    if is_running:
+        print(">>> Session already running. Restarting...")
+        is_running = False
+        time.sleep(1)
 
-        log(f">>> START session for UIDs {uids} ({minutes} min)")
-        is_running = True
-        is_paused = False
+    print(f">>> START crawler for UIDs {uids} ({minutes} minutes range)")
 
-        running_threads = []
+    is_running = True
+    is_paused = False
 
-        for uid in uids:
-            log(f">>> Launch UID {uid}")
-            t = threading.Thread(
-                target=run_crawler_templar_scores,
-                args=(uid, minutes, log, should_run, paused_flag),
-                daemon=True
-            )
-            running_threads.append(t)
-            t.start()
-            time.sleep(0.2)
+    # ONLY ONE THREAD — pass full UID LIST
+    t = threading.Thread(
+        target=run_crawler_templar_scores,
+        args=(uids, minutes, log_cli, should_run, paused_flag),
+        daemon=True
+    )
+    active_threads = [t]
+    t.start()
+
+    # Main holding loop (PM2 safe)
+    try:
+        while is_running:
+            if not t.is_alive():
+                print(">>> Crawler ended.")
+                break
+            time.sleep(0.5)
+
+    except KeyboardInterrupt:
+        print(">>> Ctrl + C detected. Stopping...")
+        is_running = False
+        time.sleep(1)
 
 
+# =======================================================
+# PAUSE
+# =======================================================
 def pause():
     global is_paused
     if not is_running:
-        log("❌ Not running.")
+        print("❌ Crawler is not running.")
         return
     is_paused = True
-    log(">>> PAUSED.")
+    print(">>> PAUSED.")
 
 
+# =======================================================
+# RESUME
+# =======================================================
 def resume():
     global is_paused
     if not is_running:
-        log("❌ Not running.")
+        print("❌ Crawler is not running.")
         return
     is_paused = False
-    log(">>> RESUMED.")
+    print(">>> RESUMED.")
 
 
+# =======================================================
+# STOP
+# =======================================================
 def stop():
     global is_running, is_paused
     if not is_running:
-        log("❌ Already stopped.")
+        print("❌ Crawler already stopped.")
         return
     is_running = False
     is_paused = False
-    log(">>> STOPPING session...")
+    print(">>> STOPPING...")
 
 
-def read_command():
-    if not os.path.exists(COMMAND_FILE):
-        return None
+# =======================================================
+# MAIN
+# =======================================================
+def main():
+    parser = argparse.ArgumentParser(description="Templar Score Monitor (Linux CLI)")
 
-    try:
-        with open(COMMAND_FILE, "r") as f:
-            data = json.load(f)
-        os.remove(COMMAND_FILE)
-        return data
-    except:
-        return None
+    parser.add_argument(
+        "--uid", nargs="+",
+        help="Nhập 1 hoặc nhiều UID, ví dụ: --uid 60 70 186",
+        required=True
+    )
 
+    parser.add_argument("--minutes", type=int, default=5, help="Time range (minutes)")
 
-def main_loop():
-    log("=== Templar Scores Daemon Started ===")
-    log("Waiting for commands (start / stop / pause / resume)...")
+    args = parser.parse_args()
 
-    while True:
-        cmd = read_command()
-        if cmd:
-            action = cmd.get("cmd")
+    # Parse danh sách UID
+    uids = []
+    for raw in args.uid:
+        raw = raw.replace(",", " ")
+        for part in raw.split():
+            if part.isdigit():
+                uids.append(int(part))
 
-            if action == "start":
-                uids = cmd.get("uid", [])
-                minutes = cmd.get("minutes", 5)
+    if not uids:
+        print("❌ UID không hợp lệ.")
+        return
 
-                if not uids:
-                    log("❌ Missing UID list")
-                else:
-                    start_crawlers(uids, minutes)
-
-            elif action == "pause":
-                pause()
-
-            elif action == "resume":
-                resume()
-
-            elif action == "stop":
-                stop()
-
-            else:
-                log(f"❌ Unknown command: {action}")
-
-        # keep daemon alive
-        time.sleep(0.5)
+    # Launch
+    start(uids, args.minutes)
 
 
 if __name__ == "__main__":
-    main_loop()
+    main()
