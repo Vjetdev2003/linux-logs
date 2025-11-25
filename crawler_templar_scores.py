@@ -1,6 +1,4 @@
-# =============================================================
-# crawler_templar_scores.py — FINAL VERSION (Multi UID + Stable)
-# =============================================================
+### file crawler_templar_scores.py
 
 import time
 import re
@@ -8,159 +6,89 @@ import json
 import os
 import datetime
 import shutil
-import shutil
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
-
 from discord_notify_templar_scores import send_discord1
 
+GRAFANA_URL = (
+    "https://grafana.tplr.ai/d/service_logs_validator_1/"
+    "service-logs-only-for-validator-uid3d-1?orgId=1&refresh=5s"
+)
 
-# ======================================================
-# GLOBAL VARIABLES
-# ======================================================
+TEMPLAR_KEYS = [
+    "Sync average steps behind",
+    "Binary Moving Average Score",
+    "Gradient Score",
+]
 
-TRACK_UIDS = []
+HISTORY_FILE = "templar_score_history.json"
+EMISSION_OFFSET = 1
+def is_emission(window):
+    try:
+        w = int(window) - EMISSION_OFFSET
+        return w % 3 == 1
+    except:
+        return False
 
-SCORES = {
-    "sync": {},
-    "binary": {},
-    "gradient": {},
-    "final": {},
-}
-
-LAST_WINDOW = None
-SENT_HISTORY_FILE = "sent_scores_history.json"
-
-
-# ======================================================
-# HISTORY
-# ======================================================
 
 def load_history():
     try:
-        with open(SENT_HISTORY_FILE, "r") as f:
+        with open(HISTORY_FILE, "r") as f:
             return set(json.load(f).keys())
     except:
         return set()
 
 def save_history(h):
-    with open(SENT_HISTORY_FILE, "w") as f:
+    with open(HISTORY_FILE, "w") as f:
         json.dump({k: True for k in h}, f)
 
-
-# ======================================================
-# EMISSION WINDOW (window % 3 == 1)
-# ======================================================
-
-def is_emission_window(w):
-    try:
-        return int(w) % 3 == 1
-    except:
-        return False
-
-
-# ======================================================
-# STACKED REPORT
-# ======================================================
-
-def build_stacked_report():
-    global LAST_WINDOW
-
-    if LAST_WINDOW is None:
-        header = "Window: ???"
-    else:
-        if is_emission_window(LAST_WINDOW):
-            header = f"Window: {LAST_WINDOW}*"
-        else:
-            header = f"Window: {LAST_WINDOW}"
-
-    text = header + "\n"
-
-    text += "\n# SYNC AVG STEPS BEHIND\n"
-    for u in TRACK_UIDS:
-        text += f"UID {u}: {SCORES['sync'].get(u, '…')}\n"
-
-    text += "\n# BINARY MOVING AVG\n"
-    for u in TRACK_UIDS:
-        text += f"UID {u}: {SCORES['binary'].get(u, '…')}\n"
-
-    text += "\n# GRADIENT SCORE\n"
-    for u in TRACK_UIDS:
-        text += f"UID {u}: {SCORES['gradient'].get(u, '…')}\n"
-
-    text += "\n# FINAL SCORE\n"
-    for u in TRACK_UIDS:
-        text += f"UID {u}: {SCORES['final'].get(u, '…')}\n"
-
-    return text
-
-
-def start_driver_linux():
+def start_driver():
     opts = webdriver.ChromeOptions()
     opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,3000")
-    opts.add_argument("--disable-infobars")
-    opts.add_argument("--disable-extensions")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
 
-    # ADD SNAP CHROMIUM HERE
-    possible_paths = [
+    # LINUX
+    linux_paths = [
         "/usr/bin/google-chrome",
         "/usr/bin/chromium-browser",
         "/usr/bin/chromium",
-        "/snap/bin/chromium",          # <---- SNAP CHROMIUM
-        shutil.which("google-chrome"),
-        shutil.which("chromium-browser"),
+        "/snap/bin/chromium",
         shutil.which("chromium"),
+        shutil.which("google-chrome"),
     ]
-
-    chrome_path = None
-    for p in possible_paths:
+    for p in linux_paths:
         if p and os.path.exists(p):
-            chrome_path = p
-            break
+            opts.binary_location = p
+            return webdriver.Chrome(options=opts)
 
-    if not chrome_path:
-        raise FileNotFoundError(
-            "❌ Không tìm thấy Chrome/Chromium.\n"
-            "Hãy cài chromium: snap install chromium"
-        )
-
-    opts.binary_location = chrome_path
-    return webdriver.Chrome(options=opts)
+    raise FileNotFoundError("❌ Linux: Chrome/Chromium không tìm thấy.")
 
 
-# ======================================================
-# MAIN CRAWLER — MULTI UID + ANTI-STALENESS
-# ======================================================
+def run_crawler_templar_scores(uids, minutes, gui_log, should_run, is_paused):
 
-def run_crawler_templar_scores(uid, time_range, gui_log, should_run, is_paused_flag):
+    uids = [str(u) for u in uids]       # convert to string list
+    gui_log(f"[TemplarScores] UIDs: {uids}")
 
     sent_history = load_history()
-
-    driver = start_driver_linux()
+    driver = start_driver()
     driver.get(GRAFANA_URL)
 
-    gui_log(f"[TemplarScores] Monitoring UID {uid}")
+    time_range = datetime.timedelta(minutes=minutes)
 
-    SCORES = {
-        "sync": {},
-        "binary": {},
-        "gradient": {},
-        "final": {}
-    }
-
-    LAST_SENT_WINDOW = None
-
+    TEMPLAR_ALL = {}
+    current_window = None
     while should_run():
 
-        if is_paused_flag():
+        if is_paused():
             time.sleep(0.3)
             continue
 
+        # scroll down to load logs
         try:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         except:
@@ -169,6 +97,7 @@ def run_crawler_templar_scores(uid, time_range, gui_log, should_run, is_paused_f
         rows = driver.find_elements(By.XPATH, "//tr[contains(@class,'logs-row')]")
 
         for row in rows:
+
             try:
                 html = row.get_attribute("innerHTML")
             except:
@@ -182,80 +111,92 @@ def run_crawler_templar_scores(uid, time_range, gui_log, should_run, is_paused_f
             # timestamp
             ts_raw = tds[2].get_text(strip=True)
             try:
-                log_time = datetime.datetime.strptime(ts_raw, "%Y-%m-%d %H:%M:%S.%f")
+                ts = datetime.datetime.strptime(ts_raw, "%Y-%m-%d %H:%M:%S.%f")
             except:
                 continue
 
-            if datetime.datetime.now() - log_time > datetime.timedelta(minutes=5):
+            if datetime.datetime.now() - ts > time_range:
                 continue
 
-            # window + eval_uid
-            window_value = None
+            # extract labels
+            window = None
             eval_uid = None
-            spans = tds[3].find_all("span")
-
-            for sp in spans:
+            for sp in tds[3].find_all("span"):
                 title = sp.get("title", "")
                 if title.startswith("current_window:"):
-                    window_value = title.split(":", 1)[1].strip()
+                    window = title.split(":", 1)[1].strip()
                 elif title.startswith("eval_uid:"):
                     eval_uid = title.split(":", 1)[1].strip()
 
-            if not window_value or eval_uid != str(uid):
+            if eval_uid not in uids or not window:
                 continue
 
             msg = tds[4].get_text(strip=True)
+            gui_log(f"[{window}] [UID {eval_uid}] {msg}")
 
-            gui_log(f"[{window_value}] [UID {uid}] {msg}")
+            if current_window is None:
+                current_window = window
 
-            # ----- GHI SCORE -----
-            if "Sync average steps behind" in msg:
-                SCORES["sync"][window_value] = msg.split(":", 1)[1].strip()
+            if window != current_window:
+                old = current_window
 
-            elif "Binary Moving Average Score" in msg:
-                SCORES["binary"][window_value] = msg.split(":", 1)[1].strip()
+                if old in TEMPLAR_ALL:
 
-            elif "Gradient Score" in msg:
-                m = re.search(r"Gradient Score[:\s]+(.+)", msg)
-                if m:
-                    SCORES["gradient"][window_value] = m.group(1).strip()
+                    uniq = f"Templar scores|{old}"
+                    if uniq not in sent_history:
 
-            elif "Computed Final Score for UID" in msg:
-                SCORES["final"][window_value] = msg.split(":")[-1].strip()
+                        emission = "Emission" if is_emission(old) else ""
+                        report = f"Window: {old} {emission}\n\n"
 
-            # ----- ĐỦ 4 SCORE → GỬI BẢNG -----
-            ready = (
-                window_value in SCORES["sync"]
-                and window_value in SCORES["binary"]
-                and window_value in SCORES["gradient"]
-                and window_value in SCORES["final"]
-            )
+                        # build per UID
+                        for u in uids:
+                            entry = TEMPLAR_ALL[old].get(u, {})
+                            sync = entry.get("sync", "Missing")
+                            binary = entry.get("binary", "Missing")
+                            gradient = entry.get("gradient", "Missing")
 
-            if ready and LAST_SENT_WINDOW != window_value:
+                            report += (
+                                f"### UID {u}\n"
+                                f"Sync average score behind: {sync}\n"
+                                f"Binary Moving Average Score: {binary}\n"
+                                f"Gradient scores: {gradient}\n\n"
+                            )
 
-                report = (
-                    f"Window: {window_value}\n\n"
-                    f"# SYNC AVG STEPS BEHIND\n{SCORES['sync'][window_value]}\n\n"
-                    f"# BINARY MOVING AVG\n{SCORES['binary'][window_value]}\n\n"
-                    f"# GRADIENT SCORE\n{SCORES['gradient'][window_value]}\n\n"
-                    f"# FINAL SCORE\n{SCORES['final'][window_value]}\n"
-                )
+                        send_discord1(f"```\n{report}\n```")
+                        gui_log(f"===== SENT SUMMARY {old} =====")
 
-                uniq_key = f"REPORT|{window_value}|{uid}"
+                        sent_history.add(uniq)
+                        save_history(sent_history)
 
-                if uniq_key not in sent_history:
-                    send_discord1(f"```\n{report}\n```")
-                    sent_history.add(uniq_key)
-                    save_history(sent_history)
+                # Xóa window cũ
+                if old in TEMPLAR_ALL:
+                    del TEMPLAR_ALL[old]
 
-                LAST_SENT_WINDOW = window_value
+                current_window = window
 
-                # Clear window cũ
-                for k in SCORES:
-                    if window_value in SCORES[k]:
-                        del SCORES[k][window_value]
+            # ---------------------------------------------------
+            # LƯU SCORE CỦA WINDOW HIỆN TẠI
+            # ---------------------------------------------------
+            if any(k in msg for k in TEMPLAR_KEYS):
 
-        time.sleep(0.7)
+                # init window
+                if window not in TEMPLAR_ALL:
+                    TEMPLAR_ALL[window] = {}
+                if eval_uid not in TEMPLAR_ALL[window]:
+                    TEMPLAR_ALL[window][eval_uid] = {}
+
+                # parse values
+                if "Sync average" in msg:
+                    TEMPLAR_ALL[window][eval_uid]["sync"] = msg.split(":", 1)[1].strip()
+
+                elif "Binary Moving" in msg:
+                    TEMPLAR_ALL[window][eval_uid]["binary"] = msg.split(":", 1)[1].strip()
+
+                elif "Gradient Score" in msg:
+                    m = re.search(r"Gradient Score[:\s]+(.+)", msg)
+                    if m:
+                        TEMPLAR_ALL[window][eval_uid]["gradient"] = m.group(1).strip()
+
+        time.sleep(0.5)
 
     driver.quit()
-
