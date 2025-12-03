@@ -5,30 +5,64 @@ import os
 import re
 import datetime
 from prettytable import PrettyTable
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
-from discord_notify import send_discord
+
+from discord_notify import send_discord, send_discord_weight
+
+FIRST_EMISSION = 60301
 
 
-GRAFANA_URL_TEMPLATE = (
+def is_emission(window):
+    try:
+        win = int(window)
+        return (win - FIRST_EMISSION) % 3 == 0
+    except:
+        return False
+
+
+# ============================
+# FIXED UID LIST
+# ============================
+FIXED_UIDS = [
+    10, 44, 51, 204, 178, 95,
+    145, 60, 228, 243, 231,
+    70, 186, 193, 89, 6, 189, 164
+]
+
+
+GRAFANA_URL = (
     "https://grafana.tplr.ai/d/service_logs_validator_1/"
-    "service-logs-only-for-validator-uid3d-1?orgId=1&refresh=5s&var-Search={UID}"
+    "service-logs-only-for-validator-uid3d-1?orgId=1&refresh=5s"
 )
 
 SENT_HISTORY_FILE = "sent_history.json"
+LAST_WEIGHT_FILE = "last_sent_window.json"
 
 
-def print_table(data):
-    table = PrettyTable()
-    table.field_names = ["Window", "Status"]
-    for window, status in data:
-        table.add_row([window, status])
-    return table.get_string()
+# ==========================================================
+# UTILS
+# ==========================================================
+def load_last_sent_window():
+    if not os.path.exists(LAST_WEIGHT_FILE):
+        return None
+    try:
+        with open(LAST_WEIGHT_FILE, "r") as f:
+            return json.load(f).get("last_window", None)
+    except:
+        return None
+
+
+def save_last_sent_window(w):
+    with open(LAST_WEIGHT_FILE, "w") as f:
+        json.dump({"last_window": w}, f)
 
 
 def load_sent_history():
@@ -41,8 +75,17 @@ def load_sent_history():
         return set()
 
 
-def save_sent_history(sent_set):
-    with open(SENT_HISTORY_FILE, "w") as f: json.dump({k: True for k in sent_set}, f)
+def save_sent_history(h):
+    with open(SENT_HISTORY_FILE, "w") as f:
+        json.dump({k: True for k in h}, f)
+
+
+def print_table(data):
+    table = PrettyTable()
+    table.field_names = ["UID", "Window", "Weight"]
+    for uid, window, w in data:
+        table.add_row([uid, window, f"{w:.4f}"])
+    return table.get_string()
 
 
 def start_driver():
@@ -51,6 +94,7 @@ def start_driver():
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-features=WebExtensions")
     opts.add_argument("--window-size=1920,4000")
 
     return webdriver.Chrome(
@@ -63,7 +107,7 @@ def wait_for_dom(driver, gui_log):
     try:
         WebDriverWait(driver, 12).until(
             EC.presence_of_element_located(
-                (By.XPATH, "//td[contains(@class,'logs-row__localtime')]")
+                (By.XPATH, "//td[contains(@class, 'logs-row__localtime')]")
             )
         )
         return True
@@ -75,313 +119,261 @@ def wait_for_dom(driver, gui_log):
 def get_rows(driver):
     try:
         return driver.find_elements(
-            By.XPATH,
-            "//tr[td[contains(@class,'logs-row__localtime')]]"
+            By.XPATH, "//tr[td[contains(@class,'logs-row__localtime')]]"
         )
     except:
         return []
 
 
-def run_crawler(uid, time_range_minutes, gui_log, should_run, paused_flag):
+# ==========================================================
+# PARSE WEIGHT TABLE
+# ==========================================================
+def parse_weight_table(msg: str):
+    result = {}
+    for ln in msg.splitlines():
 
-    url = GRAFANA_URL_TEMPLATE.replace("{UID}", str(uid))
-    driver = None
-    seen = {}  
-    sent_to_discord = load_sent_history()
-    soft_refresh_count = 0
+        if not ln.strip().startswith("│"):
+            continue
 
-    # memory used ONLY for Gradient Score rows
-    globals()["last_window_value"] = None
-    globals()["last_uid_value"] = None
+        parts = [p.strip() for p in ln.strip("│").split("│")]
+        if len(parts) < 8:
+            continue
 
-    gui_log(f"Loaded {len(sent_to_discord)} sent logs history.")
-    time_range = datetime.timedelta(minutes=time_range_minutes)
-    last_log_time_seen = time.time()
+        uid_s = parts[0]
+        win_s = parts[1]
+        weight_s = parts[7]
 
-    try:
-        gui_log(">>> Starting Chrome headless...")
-        driver = start_driver()
+        if not uid_s.isdigit():
+            continue
 
-        gui_log(f">>> Opening Grafana for UID {uid}...")
-        driver.get(url)
-        time.sleep(4)
-        wait_for_dom(driver, gui_log)
+        uid = int(uid_s)
 
-        gui_log(">>> Realtime monitoring started.")
+        try:
+            win = int(win_s)
+        except:
+            continue
 
-        while should_run():
+        try:
+            w = float(weight_s.split()[0])
+        except:
+            continue
 
-            if paused_flag():
-                time.sleep(0.25)
+        result[uid] = (win, w)
+    return result
+
+
+# ==========================================================
+# CHECKPOINT DETECTOR
+# ==========================================================
+def is_checkpoint(msg: str):
+    msg_low = msg.lower()
+
+    return (
+        "[dcp][upload]" in msg
+        or "_LATEST.json" in msg_low
+        or "Creating checkpoint at global_step" in msg_low
+    )
+
+
+# ==========================================================
+# MAIN CRAWLER
+# ==========================================================
+def run_crawler(minutes, gui_log, should_run, paused_flag):
+
+    gui_log(">>> Starting Chrome…")
+    driver = start_driver()
+
+    gui_log(">>> Loading Grafana…")
+    driver.get(GRAFANA_URL)
+    time.sleep(4)
+    wait_for_dom(driver, gui_log)
+
+    gui_log(">>> Monitoring started.")
+
+    sent_history = load_sent_history()
+    last_sent_window = load_last_sent_window()
+    seen = {}
+    time_range = datetime.timedelta(minutes=minutes)
+
+    # ==========================================================
+    # MAIN LOOP
+    # ==========================================================
+    while should_run():
+
+        if paused_flag():
+            time.sleep(0.5)
+            continue
+
+        now = datetime.datetime.now()
+
+        try:
+            driver.execute_script(
+                "window.scrollTo(0, document.body.scrollHeight);"
+            )
+        except:
+            pass
+
+        rows = get_rows(driver)
+        if not rows:
+            time.sleep(1)
+            continue
+
+        logs = []
+
+        # ----------------------------------------------------------
+        # Extract logs
+        # ----------------------------------------------------------
+        for row in rows:
+            try:
+                html = row.get_attribute("innerHTML")
+            except:
                 continue
 
-            now = datetime.datetime.now()
-            logs = []
+            soup = BeautifulSoup(html, "html.parser")
+            tds = soup.find_all("td")
+            if len(tds) < 5:
+                continue
+
+            ts = tds[2].get_text(strip=True)
 
             try:
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                log_time = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f")
             except:
-                pass
-
-            if time.time() - last_log_time_seen > 120:
-                gui_log(">>> Soft refresh...")
-                soft_refresh_count += 1
                 try:
-                    driver.refresh()
-                    time.sleep(3)
-                    wait_for_dom(driver, gui_log)  
+                    log_time = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
                 except:
-                    gui_log(">>> Soft refresh crashed, restarting driver...")
-                    driver.quit()
-                    driver = start_driver()
-                    driver.get(url)
-                    time.sleep(6)
-                    wait_for_dom(driver, gui_log)
                     continue
 
-                if soft_refresh_count >= 5:
-                    gui_log(">>> HARD RELOAD triggered")
-                    try:
-                        driver.get(url)
-                        time.sleep(6)
-                        wait_for_dom(driver, gui_log)
-                        soft_refresh_count = 0
-                    except:
-                        gui_log(">>> HARD reload crashed — restarting driver...")
-                        driver.quit()
-                        driver = start_driver()
-                        driver.get(url)
-                        time.sleep(6)
-                        wait_for_dom(driver, gui_log)
-                    continue
-
-            rows = get_rows(driver)
-            if not rows:
-                time.sleep(2)
-                rows = get_rows(driver)
-
-            if not rows:
-                gui_log(">>> DOM not ready (0 rows), skipping...")
-                time.sleep(1)
+            if now - log_time > time_range:
                 continue
 
-            # ===========================================================
-            # PARSE ROWS
-            # ===========================================================
-            for row in rows:
-                try:
-                    html = row.get_attribute("innerHTML")
-                except:   continue
+            msg = tds[4].get_text("\n", strip=False)
+            uniq = ts + "|" + msg
 
-                soup = BeautifulSoup(html, "html.parser")
-                tds = soup.find_all("td")
-                if len(tds) < 5:
+            logs.append((log_time, uniq, msg))
+
+        logs.sort(key=lambda x: x[0])
+
+        # ==========================================================
+        # PROCESS LOGS
+        # ==========================================================
+        for (log_time, uniq, msg) in logs:
+
+            if uniq not in seen:
+                gui_log(msg)
+                seen[uniq] = now
+
+            # ======================================================
+            # CHECKPOINT (send once)
+            # ======================================================
+            if is_checkpoint(msg):
+
+                key = f"CHECKPOINT|{uniq}"
+
+                if key not in sent_history:
+                    send_discord(f"[CHECKPOINT] {msg}")
+                    sent_history.add(key)
+                    save_sent_history(sent_history)
+
+                continue
+
+            # ======================================================
+            # MEGA SLASH
+            # ======================================================
+            if "MEGA SLASH" in msg and "MEGA" in msg:
+
+                m = re.search(r"UID\s+(\d+)", msg)
+                mega_uid = int(m.group(1)) if m else None
+
+                if mega_uid in FIXED_UIDS:
+                    key = f"MEGA|{uniq}"
+
+                    if key not in sent_history:
+                        send_discord(f"[MEGA] {msg}")
+                        sent_history.add(key)
+                        save_sent_history(sent_history)
+
+                continue
+
+            # ======================================================
+            # ERROR FILTER
+            # ======================================================
+            error_patterns = [
+                "negative eval frequency",
+                "avg_steps_behind=",
+                "No gradient gathered",
+                "Consecutive misses",
+                "Skipped score of UID",
+                "Skipped UID",
+                "Skipped reducing score of UID",
+                "No gradient received from",
+                "negative evaluations",
+                "consecutive negative evaluations",
+            ]
+
+            if any(p in msg for p in error_patterns):
+
+                m = re.search(r"UID\s+(\d+)", msg)
+                eval_uid = int(m.group(1)) if m else None
+
+                if eval_uid in FIXED_UIDS:
+                    if uniq not in sent_history:
+                        send_discord(f"[UID {eval_uid}] {msg}")
+                        sent_history.add(uniq)
+                        save_sent_history(sent_history)
+
+            # ======================================================
+            # WEIGHT BLOCK – send once per new window
+            # ======================================================
+            if "Updated scores for evaluated UIDs" in msg:
+
+                parsed = parse_weight_table(msg)
+                if not parsed:
                     continue
 
-                # extract columns
-                try:
-                    window_value = int(tds[0].get_text(strip=True))
-                except:
-                    window_value = None
+                raw_window = max(w for (w, _) in parsed.values())
+                real_window = raw_window + 1
+                emission = "Emission" if is_emission(real_window) else ""
 
-                uid_value = tds[1].get_text(strip=True)
-                ts = tds[2].get_text(strip=True)
-                msg = tds[4].get_text(strip=True)
+                if last_sent_window == real_window:
+                    continue
 
-                # update last window/uid for Gradient Score ONLY
-                if window_value is not None:
-                    globals()["last_window_value"] = window_value
-                if uid_value:
-                    globals()["last_uid_value"] = uid_value
+                rows_out = []
+                total = 0.0
 
-                # parse timestamp
-                try:
-                    log_time = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f")
-                except:
-                    try:
-                        log_time = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                    except:
+                for u in FIXED_UIDS:
+                    if u not in parsed:
                         continue
 
-                if now - log_time > time_range:
+                    _, wt = parsed[u]
+
+                    if wt == 0:
+                        continue
+
+                    rows_out.append((u, raw_window, wt))
+                    total += wt
+
+                if not rows_out:
                     continue
 
-                # extract label eval_uid
-                label_td = tds[3]
-                labels = {}
-                for sp in label_td.find_all("span"):
-                    title = sp.get("title", "")
-                    if ":" in title:
-                        key, val = title.split(":", 1)
-                        labels[key.strip()] = val.strip() 
-                        eval_uid = labels.get("eval_uid")
-                if not eval_uid:
-                    m2 = re.search(r"UID\s+(\d+)", msg)
-                    if m2:
-                        eval_uid = m2.group(1)
-
-                uniq = ts + "|" + msg
-                logs.append((log_time, uniq, ts, eval_uid, msg, window_value, uid_value))
-
-            logs.sort(key=lambda x: x[0])
-
-            # ===========================================================
-            # PROCESS LOGS
-            # ===========================================================
-            for (
-                log_time,
-                uniq,
-                ts,
-                eval_uid,
-                msg,
-                window_value,
-                uid_value
-            ) in logs:
-
-                # GUI display
-                if uniq not in seen:
-                    last_log_time_seen = time.time()
-                    soft_refresh_count = 0
-                    if eval_uid:
-                        gui_log(f"[{ts}] [Eval UID: {eval_uid}] {msg}")
-                    else:
-                        gui_log(f"[{ts}] {msg}")
-                    seen[uniq] = log_time
-
-                # =======================================================
-                # SPECIAL CASE: CHECKPOINT UPLOAD (NO UID, SEND ONCE)
-                # =======================================================
-                if "[DCP][upload]" in msg or "checkpoints" in msg and "_LATEST.json" in msg:
-
-                    global_key = "checkpoint" + msg and "LATEST.json" in msg
-
-                    if global_key not in sent_to_discord:
-                        send_discord(f"[CHECKPOINT] {msg}") 
-                        sent_to_discord.add(global_key)
-                        save_sent_history(sent_to_discord)
-
-                    continue
-
-                # =======================================================
-                # GRADIENT SCORE (special window fallback)
-                # =======================================================
-                mgs = re.search(
-                    r"Gradient Score[:\s]+(-?\d+\.?\d*(e-?\d+)?)",
-                    msg,
-                    re.IGNORECASE
+                table_str = print_table(rows_out)
+                send_discord_weight(
+                    f"```\nWindow = {real_window} {emission}\n"
+                    f"{table_str}\nTotal = {total:.4f}\n```"
                 )
 
-                if mgs:
+                last_sent_window = real_window
+                save_last_sent_window(real_window)
 
-                    score = float(mgs.group(1))
+        # cleanup seen logs
+        old = [k for k, t in seen.items() if now - t > time_range]
+        for k in old:
+            del seen[k]
 
-                    # If this row does not have window → use last_window
-                    real_window = (
-                        window_value
-                        if window_value is not None
-                        else globals()["last_window_value"]
-                    )
+        time.sleep(5)
 
-                    real_uid = (
-                        uid_value
-                        if uid_value
-                        else globals()["last_uid_value"]
-                    )
-
-                    if str(real_uid) == str(uid) and real_window:
-
-                        status = "d" if score > 0 else "a"
-
-                        if "gradient_history" not in globals():
-                            globals()["gradient_history"] = {}
-                        gradient_history = globals()["gradient_history"]
-
-                        gradient_history[real_window] = status
-
-                        gui_log(
-                            f"[Gradient Score] Window {real_window} = {score} → {status}" )
-
-                        # table (test: 1 window)
-                        last1 = sorted(
-                            gradient_history.keys(), reverse=True
-                        )[:1]
-                        table_data = [
-                            (w, gradient_history[w]) for w in last1
-                        ]
-                        table_str = print_table(table_data)
-
-                        gui_log(
-                            "\n===== GRADIENT WINDOW STATUS =====\n"
-                            + table_str
-                            + "\n"
-                        )
-                        send_discord(f"```\n{table_str}\n```")
-
-                        # keep only 1
-                        for old in list(gradient_history.keys()):
-                            if old not in last1:
-                                del gradient_history[old]
-
-                # =======================================================
-                # ORIGINAL ALERT LOGIC
-                # =======================================================
-                send_flag = False
-
-                if "negative eval frequency" in msg:
-                    send_flag = True
-
-                elif "avg_steps_behind=" in msg and "> max=" in msg:
-                    send_flag = eval_uid == str(uid)
-
-                elif "No gradient gathered" in msg or "Consecutive misses" in msg:
-                    send_flag = True
-
-                elif "Skipped score of UID" in msg:
-                    send_flag = True
-
-                elif "Skipped UID" in msg:  
-                    send_flag = eval_uid == str(uid)
-
-                elif "Skipped reducing score of UID" in msg:
-                    send_flag = eval_uid == str(uid)
-
-                elif "No gradient received from" in msg:
-                    send_flag = eval_uid == str(uid)
-
-                elif "MEGA SLASH" in msg:
-                    send_flag = eval_uid == str(uid)
-
-                elif "negative evaluations" in msg:
-                    send_flag = eval_uid == str(uid)
-
-                elif "consecutive negative evaluations" in msg:
-                    send_flag = eval_uid == str(uid)
-
-                if eval_uid and eval_uid != str(uid):
-                    send_flag = False
-
-                if send_flag and uniq not in sent_to_discord:
-                    send_discord(f"[UID: {eval_uid}] {msg}")
-                    sent_to_discord.add(uniq)
-                    save_sent_history(sent_to_discord)
-
-            # cleanup
-            old_keys = []
-            for k, t in seen.items():
-                if now - t > time_range:
-                    old_keys.append(k)
-            for k in old_keys:
-                del seen[k]
-
-            time.sleep(0.25)
-
-    finally:
-        gui_log(">>> HEADLESS CLOSED.")
-        try:
-            driver.quit()
-        except:
-            pass
-        try:
-            driver.service.stop()
-        except:
-            pass
+    # shutdown
+    try:
+        driver.quit()
+    except:
+        pass
