@@ -34,9 +34,9 @@ def is_emission(window):
 FIXED_UIDS = [
     10, 44, 51, 204, 178, 95,
     145, 60, 228, 243, 231,
-    70, 186, 193, 89, 6, 189, 164
+    70, 186, 193, 89, 6, 189, 164, 180, 217, 197, 108, 49, 219, 29, 170, 162, 131, 215, 235,
+    15, 25, 50
 ]
-
 
 GRAFANA_URL = (
     "https://grafana.tplr.ai/d/service_logs_validator_1/"
@@ -163,19 +163,6 @@ def parse_weight_table(msg: str):
 
 
 # ==========================================================
-# CHECKPOINT DETECTOR
-# ==========================================================
-def is_checkpoint(msg: str):
-    msg_low = msg.lower()
-
-    return (
-        "[dcp][upload]" in msg
-        or "_LATEST.json" in msg_low
-        or "Creating checkpoint at global_step" in msg_low
-    )
-
-
-# ==========================================================
 # MAIN CRAWLER
 # ==========================================================
 def run_crawler(minutes, gui_log, should_run, paused_flag):
@@ -264,17 +251,18 @@ def run_crawler(minutes, gui_log, should_run, paused_flag):
                 seen[uniq] = now
 
             # ======================================================
-            # CHECKPOINT (send once)
+            # CHECKPOINT (global, send once)
             # ======================================================
-            if is_checkpoint(msg):
-
+            if (
+                "[dcp][upload]" in msg.lower()
+                or "_latest.json" in msg.lower()
+                or "creating checkpoint at global_step" in msg.lower()
+            ):
                 key = f"CHECKPOINT|{uniq}"
-
                 if key not in sent_history:
                     send_discord(f"[CHECKPOINT] {msg}")
                     sent_history.add(key)
                     save_sent_history(sent_history)
-
                 continue
 
             # ======================================================

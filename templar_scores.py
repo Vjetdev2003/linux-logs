@@ -4,6 +4,20 @@ import time
 import subprocess
 from crawler_templar_scores import run_crawler_templar_scores
 
+# ==========================
+# FIXED UID LIST
+# ==========================
+FIXED_UIDS = [
+    "10","44","51","204","178","95",
+    "145","60","228","243","231",
+    "70","186","193","89","6","189","164",
+    "180","217","197","219","29","108","49",
+    "170","162", "215","235","131", "15","25","50"
+]
+
+# ==========================
+# KILL OLD CHROME INSTANCES
+# ==========================
 def clean_chrome_processes():
     patterns = [
         "chrome --headless",
@@ -19,67 +33,76 @@ def clean_chrome_processes():
 
 clean_chrome_processes()
 
+
+# ==========================
+# FLAGS
+# ==========================
 is_running = False
 is_paused = False
 
-active_thread = None
+crawler_thread = None
 
 
+# ==========================
+# HELPERS
+# ==========================
 def log_cli(msg):
     print(msg, flush=True)
 
-
 def should_run():
     return is_running
-
 
 def paused_flag():
     return is_paused
 
 
-def start(uids, minutes):
-    global is_running, is_paused, active_thread
+# ==========================
+# START WORKER THREAD
+# ==========================
+def start_worker(minutes):
+    global crawler_thread
 
-    if is_running:
-        print("Restarting...")
-        is_running = False
-        time.sleep(1)
+    crawler_thread = threading.Thread(
+        target=run_crawler_templar_scores,
+        args=(FIXED_UIDS, minutes, log_cli, should_run, paused_flag),
+        daemon=True
+    )
+    crawler_thread.start()
 
-    print(f">>> START for UIDs {uids}")
+
+# ==========================
+# MAIN LOOP (NO WHILE TRUE)
+# ==========================
+def start(minutes):
+    global is_running, is_paused
+
+    print(f">>> START with fixed UIDs = {FIXED_UIDS}")
 
     is_running = True
     is_paused = False
 
-    active_thread = threading.Thread(
-        target=run_crawler_templar_scores,
-        args=(uids, minutes, log_cli, should_run, paused_flag),
-        daemon=True
-    )
-    active_thread.start()
+    start_worker(minutes)
 
-    # keep alive
+    # Instead of infinite while True, use a soft-loop so PM2 can restart process
     while is_running:
-        if not active_thread.is_alive():
-            print(">>> END")
-            break
+        # If thread dies unexpectedly → restart it
+        if not crawler_thread.is_alive():
+            print(">>> Worker crashed! Restarting worker in 3 seconds...")
+            time.sleep(3)
+            start_worker(minutes)
+
         time.sleep(1)
 
 
+# ==========================
+# CLI ENTRY
+# ==========================
 def main():
     parser = argparse.ArgumentParser()
-
-    parser.add_argument("--uid", nargs="+", required=True)
     parser.add_argument("--minutes", type=int, default=5)
-
     args = parser.parse_args()
 
-    uids = []
-    for raw in args.uid:
-        for part in raw.replace(",", " ").split():
-            if part.isdigit():
-                uids.append(int(part))
-
-    start(uids, args.minutes)
+    start(args.minutes)
 
 
 if __name__ == "__main__":

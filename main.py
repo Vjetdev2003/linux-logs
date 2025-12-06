@@ -11,23 +11,13 @@ from crawler import run_crawler     # <<=== Dùng file crawler mới của bạn
 FIXED_UIDS = [
     10, 44, 51, 204, 178, 95,
     145, 60, 228, 243, 231,
-    70, 186, 193, 89, 6, 189, 164
+    70, 186, 193, 89, 6, 189,
+    164, 217, 180, 197, 108, 162,
+    170, 29, 219, 49, 235, 215, 131, 15,
+    25, 50
 ]
 
-def clean_chrome_processes():
-    patterns = [
-        "chrome --headless",
-        "chromedriver",
-        "google-chrome",
-        "chromium"
-    ]
-    for p in patterns:
-        try:
-            subprocess.call(["pkill", "-f", p])
-        except:
-            pass
 
-clean_chrome_processes()
 # =====================================================
 # CLEAN OLD CHROME
 # =====================================================

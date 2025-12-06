@@ -19,8 +19,8 @@ GRAFANA_URL = (
 )
 
 TEMPLAR_KEYS = [
-    "Sync average steps behind",
-    "Binary Moving Average Score",
+    "Sync average",
+    "Binary Moving",
     "Gradient Score",
     "Computed Final Score"
 ]
@@ -28,8 +28,9 @@ TEMPLAR_KEYS = [
 HISTORY_FILE = "templar_score_history.json"
 
 # Thời gian chờ trước khi chốt 1 window
-WINDOW_DELAY_SECONDS = 60 * 14  # 10 phút
+WINDOW_DELAY_SECONDS = 60 * 15  # 10 phút
 
+# CALC emission
 FIRST_EMISSION = 60301
 
 def is_emission(window):
@@ -38,9 +39,6 @@ def is_emission(window):
         return (win - FIRST_EMISSION) % 3 == 0
     except:
         return False
-# ============================================================
-# HISTORY
-# ============================================================
 
 def load_history():
     try:
@@ -54,10 +52,6 @@ def save_history(h):
         json.dump({k: True for k in h}, f)
 
 
-# ============================================================
-# SELENIUM DRIVER
-# ============================================================
-
 def start_driver():
     opts = webdriver.ChromeOptions()
     opts.add_argument("--headless=new")
@@ -67,6 +61,30 @@ def start_driver():
     opts.add_argument("--window-size=1920,3000")
     opts.add_argument("--disable-blink-features=AutomationControlled")
 
+    # ============================
+    # WINDOWS
+    # ============================
+    # if os.name == "nt":
+    #     # thử tìm chrome.exe
+    #     win_candidates = [
+    #         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    #         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    #         shutil.which("chrome"),
+    #         shutil.which("google-chrome"),
+    #         shutil.which("chrome.exe"),
+    #         shutil.which("google-chrome.exe")
+    #     ]
+
+    #     for p in win_candidates:
+    #         if p and os.path.exists(p):
+    #             opts.binary_location = p
+    #             return webdriver.Chrome(options=opts)
+
+    #     raise FileNotFoundError("❌ Windows: Chrome not found. Cài Google Chrome trước!")
+
+    # ============================
+    # LINUX
+    # ============================
     linux_paths = [
         "/usr/bin/google-chrome",
         "/usr/bin/chromium-browser",
@@ -80,7 +98,8 @@ def start_driver():
             opts.binary_location = p
             return webdriver.Chrome(options=opts)
 
-    raise FileNotFoundError("❌ Chrome/Chromium not found.")
+    raise FileNotFoundError("❌ Chrome/Chromium not found on system.")
+
 
 
 # ============================================================
@@ -96,7 +115,10 @@ def build_and_send(window, data, uids, delayed_for_window, delayed_window, sent_
 
     # --- MAIN WINDOW SECTION ---
     for uid in uids:
-        entry = data.get(uid, {})
+        if uid not in data:
+            continue
+
+        entry = data[uid]
         sync = entry.get("sync", "Missing")
         binary = entry.get("binary", "Missing")
         gradient = entry.get("gradient", "Missing")
